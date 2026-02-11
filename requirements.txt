@@ -1,0 +1,30 @@
+# Core dependencies
+python-dotenv>=1.0.0
+pyyaml>=6.0
+
+# Database
+# SQLite3 is included in Python standard library
+psycopg2-binary>=2.9.0  # PostgreSQL/Supabase support
+
+# API Client
+requests>=2.31.0
+aiohttp>=3.9.0  # Async HTTP client for Vercel API
+
+# Discord Bot (optional - for Discord functionality)
+discord.py>=2.3.0
+
+# AI Analysis (optional)
+google-generativeai>=0.3.0
+
+# Spreadsheet (optional)
+google-auth>=2.23.0
+google-auth-oauthlib>=1.1.0
+google-auth-httplib2>=0.1.1
+google-api-python-client>=2.100.0
+
+# Web Scraping (optional)
+beautifulsoup4>=4.12.0
+selenium>=4.15.0
+
+# HTTP Server (for Vercel)
+# Included in Python standard library
