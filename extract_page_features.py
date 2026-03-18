@@ -116,7 +116,7 @@ def extract_primary_entity(keyword: str) -> Optional[str]:
 
 def generate_embedding_with_gemini(keyword: str, api_key: str) -> Optional[List[float]]:
     """
-    Gemini APIでembeddingを生成
+    Gemini APIでembeddingを生成（モジュール直下の genai.embed_content を使用）
     
     Args:
         keyword: キーワード
@@ -130,9 +130,14 @@ def generate_embedding_with_gemini(keyword: str, api_key: str) -> Optional[List[
     
     try:
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('models/embedding-001')
-        result = model.embed_content(keyword)
-        return result['embedding']
+        # モジュール直下の embed_content を使用（GenerativeModel には embed_content がない）
+        result = genai.embed_content(
+            model="models/embedding-001",
+            content=keyword,
+            task_type="retrieval_document",
+        )
+        emb = result.get("embedding")
+        return emb if isinstance(emb, list) else None
     except Exception as e:
         print(f"  ⚠️  Embedding生成失敗: {e}")
         return None
@@ -224,6 +229,11 @@ def process_keywords(db_path: str = "rankings.db"):
 
 if __name__ == "__main__":
     import sys
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+    except ImportError:
+        pass
     db_path = "rankings.db"
     if len(sys.argv) > 1:
         db_path = sys.argv[1]

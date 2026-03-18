@@ -54,7 +54,9 @@ class LinkBot(commands.Bot):
         
     def load_config(self):
         """設定ファイルを読み込む"""
-        with open('config/settings.yaml', 'r', encoding='utf-8') as f:
+        # 設定ファイルのパスを絶対パスに変換
+        config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config', 'settings.yaml')
+        with open(config_path, 'r', encoding='utf-8') as f:
             self.config = yaml.safe_load(f)
         
         # 環境変数
@@ -71,7 +73,11 @@ class LinkBot(commands.Bot):
     def setup_clients(self):
         """各種クライアントをセットアップ"""
         # Storage（既存のデータベースを共有）
-        self.storage = RankingStorage(self.config.get('db_path', 'rankings.db'))
+        db_path = self.config.get('db_path', 'rankings.db')
+        # 相対パスの場合は絶対パスに変換
+        if not os.path.isabs(db_path):
+            db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), db_path)
+        self.storage = RankingStorage(db_path)
         
         # AI Analyzer
         self.ai_analyzer = None
