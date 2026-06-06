@@ -38,3 +38,4 @@ Thumbs.db
 # その他
 *.bak
 *.tmp
+service-account-key.json
