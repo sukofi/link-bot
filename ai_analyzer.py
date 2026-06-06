@@ -965,9 +965,12 @@ SEOキーワード「{keyword}」の順位が {previous_rank}位 から {current
             entity = kw.get('primary_entity') or '不明'
             intent = kw.get('intent_label', '一般')
             recall_score = kw.get('recall_score', 0)
+            url = kw.get('url', 'URL未設定')
+            rank = kw.get('current_rank')
+            rank_str = f", 順位={rank}位" if rank else ""
             prompt_parts.append(
                 f"{i}. 「{keyword}」 "
-                f"(Entity={entity}, Intent={intent}, スコア={recall_score:.0f})"
+                f"(Entity={entity}, Intent={intent}, スコア={recall_score:.0f}{rank_str}, URL={url})"
             )
             
             # 最初の3件は詳細表示
@@ -1081,7 +1084,8 @@ SEOキーワード「{keyword}」の順位が {previous_rank}位 から {current
                         'url': kw_info['url'],
                         'genre': kw_info.get('genre', '未分類'),
                         'score': score,
-                        'reason': reason
+                        'reason': reason,
+                        'current_rank': kw_info.get('current_rank')
                     })
             
             print(f"[INFO] {len(related_keywords)}件の関連キーワードを抽出しました")
@@ -1175,14 +1179,29 @@ SEOキーワード「{keyword}」の順位が {previous_rank}位 から {current
                 target_intent, candidate_intent
             )
             
-            # 総合スコア（Entityがない場合はジャンルで補完）
+            # キーワードテキスト重複スコア（Entityが欠損している場合の補完）
+            keyword_text_score = self._calculate_keyword_text_score(
+                target_keyword, kw['keyword']
+            )
+
+            # 総合スコア（Entityがない場合はジャンル+テキストで補完）
             if entity_match_score > 0:
-                # Entityがある場合は従来通り
-                total_score = (entity_match_score * 0.6) + (intent_transition_score * 0.4)
+                total_score = (
+                    entity_match_score * 0.50
+                    + intent_transition_score * 0.35
+                    + keyword_text_score * 0.15
+                )
             else:
-                # Entityがない場合はジャンルとIntentで評価
-                total_score = (genre_match_score * 0.5) + (intent_transition_score * 0.5)
-            
+                total_score = (
+                    genre_match_score * 0.30
+                    + intent_transition_score * 0.40
+                    + keyword_text_score * 0.30
+                )
+
+            # 検索順位によるブースト（実績あるページを優先）
+            rank_boost = self._calculate_rank_boost(kw)
+            total_score += rank_boost
+
             # 閾値フィルタ（スコア20以上に緩和）
             if total_score >= 20:
                 candidates.append({
@@ -1190,7 +1209,9 @@ SEOキーワード「{keyword}」の順位が {previous_rank}位 から {current
                     'recall_score': total_score,
                     'entity_match_score': entity_match_score,
                     'genre_match_score': genre_match_score,
-                    'intent_transition_score': intent_transition_score
+                    'intent_transition_score': intent_transition_score,
+                    'keyword_text_score': keyword_text_score,
+                    'rank_boost': rank_boost
                 })
                 
                 # トップ10のみ詳細ログ
@@ -1200,13 +1221,31 @@ SEOキーワード「{keyword}」の順位が {previous_rank}位 から {current
                     if genre_match_score > 0:
                         print(f"        Genre={candidate_genre} (スコア={genre_match_score})")
                     print(f"        Intent={candidate_intent} (スコア={intent_transition_score})")
+                    print(f"        TextOverlap={keyword_text_score}, RankBoost={rank_boost}")
                     print(f"        総合スコア={total_score:.1f}")
             else:
                 excluded_reasons['low_score'] += 1
         
         # スコア順にソート
         candidates.sort(key=lambda x: x['recall_score'], reverse=True)
-        
+
+        # URL重複排除: 同一URLで複数キーワードがある場合、最高スコアのみ残す
+        seen_urls: Dict[str, int] = {}  # url -> index in deduped list
+        deduped: List[Dict[str, Any]] = []
+        for cand in candidates:
+            url = cand.get('url', '')
+            if not url:
+                deduped.append(cand)
+                continue
+            if url not in seen_urls:
+                seen_urls[url] = len(deduped)
+                deduped.append(cand)
+            # else: 同URLの低スコア候補は破棄（既にソート済みなので先着が最高スコア）
+        removed = len(candidates) - len(deduped)
+        if removed > 0:
+            print(f"[DEBUG] URL重複排除: {removed}件削除")
+        candidates = deduped
+
         print(f"[DEBUG] 候補生成完了: {len(candidates)}件")
         print(f"[DEBUG] 除外内訳:")
         print(f"        自分自身: {excluded_reasons['self']}件")
@@ -1263,6 +1302,63 @@ SEOキーワード「{keyword}」の順位が {previous_rank}位 から {current
         # 例: 「白州」と「白州18年」は異なる商品なので候補として有効
         return False
     
+    def _calculate_keyword_text_score(
+        self,
+        target_keyword: str,
+        candidate_keyword: str
+    ) -> int:
+        """
+        キーワードテキスト重複スコア計算
+
+        Entityがない場合でもキーワード文字列の共通トークンで関連性を評価する。
+
+        スコアリング:
+        - Overlap係数（短い方を分母）: 部分包含に強い
+        - Jaccard係数: 純粋な重複度
+        - 両者の最大値 × 70 を最大スコアとする
+
+        Returns:
+            スコア (0-70)
+        """
+        target_tokens = set(target_keyword.split())
+        candidate_tokens = set(candidate_keyword.split())
+
+        if not target_tokens or not candidate_tokens:
+            return 0
+
+        common = target_tokens & candidate_tokens
+        if not common:
+            return 0
+
+        jaccard = len(common) / len(target_tokens | candidate_tokens)
+        overlap = len(common) / min(len(target_tokens), len(candidate_tokens))
+        score = max(jaccard, overlap * 0.8) * 70
+        return int(score)
+
+    def _calculate_rank_boost(self, kw_info: Dict[str, Any]) -> int:
+        """
+        検索順位によるスコアブースト
+
+        SEO的に評価が高いページ（上位表示中）を優先する。
+
+        Returns:
+            ブースト値 (0-15)
+        """
+        rank = kw_info.get('current_rank')
+        if not rank:
+            return 0
+        try:
+            rank = int(rank)
+        except (TypeError, ValueError):
+            return 0
+        if rank <= 3:
+            return 15
+        elif rank <= 10:
+            return 10
+        elif rank <= 20:
+            return 5
+        return 0
+
     def _calculate_entity_match_score(
         self,
         target_entity: Optional[str],

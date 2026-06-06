@@ -33,6 +33,15 @@ except (ImportError, PermissionError, OSError) as e:
     print(f"[WARN] ai_analyzer のインポートに失敗しました: {e}")
     print("[WARN] AI分析機能は無効になりますが、Botは動作します")
 
+# Google Sheets同期機能
+try:
+    from sheets_sync import sync_to_storage
+    SHEETS_SYNC_AVAILABLE = True
+except ImportError as e:
+    sync_to_storage = None
+    SHEETS_SYNC_AVAILABLE = False
+    print(f"[WARN] sheets_sync のインポートに失敗しました: {e}")
+
 
 class LinkBot(commands.Bot):
     """内部リンク提案専用Bot"""
@@ -61,7 +70,15 @@ class LinkBot(commands.Bot):
         
         # 環境変数
         self.gemini_api_key = os.getenv('GEMINI_API_KEY')
-        
+
+        # Google Sheets同期設定
+        self.spreadsheet_id = os.getenv(
+            'SPREADSHEET_ID',
+            '1RZmk6tJeIpLExKQ3gAPZ-qCOOe2Pmv0BsY7GYGlBbDk'
+        )
+        self.google_credentials_path = os.getenv('GOOGLE_CREDENTIALS_PATH')
+        self.sheet_name = os.getenv('SHEET_NAME', '管理シート')
+
         # 許可するチャンネルID（オプション）
         # 特定のチャンネルでのみ動作させたい場合は、.envにチャンネルIDを設定
         allowed_channels = os.getenv('LINK_BOT_ALLOWED_CHANNELS')
@@ -97,8 +114,23 @@ class LinkBot(commands.Bot):
         """ボット起動時"""
         print(f'[INFO] {self.user} としてログインしました')
         print(f'[INFO] 内部リンク提案専用Bot')
-        print(f'[INFO] コマンド: /links, /search, /guide, /genres, /status')
+        print(f'[INFO] コマンド: /links, /search, /guide, /genres, /status, /sync')
         print('='*60)
+
+        # 起動時にスプレッドシートから自動同期
+        if SHEETS_SYNC_AVAILABLE and self.google_credentials_path:
+            try:
+                print("[SYNC] 起動時スプレッドシート同期を開始...")
+                stats = await asyncio.to_thread(
+                    sync_to_storage,
+                    self.spreadsheet_id,
+                    self.google_credentials_path,
+                    self.storage,
+                    self.sheet_name
+                )
+                print(f"[SYNC] 起動時同期完了: 新規={stats['inserted']}件, 更新={stats['updated']}件")
+            except Exception as e:
+                print(f"[WARN] 起動時スプレッドシート同期に失敗: {e}")
     
     async def on_message(self, message):
         """メッセージ受信時の処理"""
@@ -189,6 +221,49 @@ class LinkBot(commands.Bot):
 bot = LinkBot()
 
 
+@bot.command(name='sync', help='Google Sheetsからキーワード・URLを同期')
+async def sync_from_sheet(ctx):
+    """
+    スプレッドシートからDBへキーワード・URLを同期する。
+
+    使い方:
+        /sync
+    """
+    if not SHEETS_SYNC_AVAILABLE:
+        await ctx.send("❌ Google Sheets同期機能が利用できません（sheets_syncのインポート失敗）。")
+        return
+
+    if not bot.google_credentials_path:
+        await ctx.send(
+            "❌ `GOOGLE_CREDENTIALS_PATH` が設定されていません。\n"
+            ".envにサービスアカウントJSONのパスを設定してください。"
+        )
+        return
+
+    await ctx.send("🔄 スプレッドシートからデータを同期中...")
+
+    try:
+        stats = await asyncio.to_thread(
+            sync_to_storage,
+            bot.spreadsheet_id,
+            bot.google_credentials_path,
+            bot.storage,
+            bot.sheet_name
+        )
+        await ctx.send(
+            f"✅ 同期完了！\n"
+            f"📥 新規登録: {stats['inserted']}件\n"
+            f"🔄 URL更新: {stats['updated']}件\n"
+            f"📊 シート取得: {stats.get('fetched', '?')}行\n"
+            f"合計処理: {stats['total']}件"
+        )
+    except Exception as e:
+        await ctx.send(f"❌ 同期に失敗しました: {str(e)[:300]}")
+        print(f"[ERROR] sync_from_sheet: {e}")
+        import traceback
+        traceback.print_exc()
+
+
 @bot.command(name='links', help='対策キーワードの内部リンク候補を提案')
 async def suggest_links(ctx, *, target_keyword: str = None):
     """
@@ -265,6 +340,16 @@ async def suggest_links_local(ctx, target_keyword: str):
     # データベースから全キーワードを取得
     print(f"[BOT] Fetching all keywords from database")
     all_keywords = bot.storage.get_all_keywords()
+
+    # 順位情報をマージ（rank_boostスコアリングに使用）
+    try:
+        all_rankings = bot.storage.get_all_rankings()
+        rank_map = {r['keyword']: r.get('last_rank') for r in all_rankings if r.get('last_rank')}
+        for kw in all_keywords:
+            if kw['keyword'] in rank_map:
+                kw['current_rank'] = rank_map[kw['keyword']]
+    except Exception as e:
+        print(f"[WARN] 順位情報のマージに失敗: {e}")
     
     if not all_keywords:
         await ctx.send("❌ データベースにキーワードが登録されていません。")
@@ -335,10 +420,13 @@ async def send_links_result(ctx, target_keyword: str, related_keywords: List[Dic
         url = kw.get('url', 'URL未設定')
         reason = kw.get('reason', '関連性が高いキーワード')
         genre = kw.get('genre', '未分類')
-        
+        rank = kw.get('current_rank')
+        rank_str = f"📊 現在順位: {rank}位\n" if rank else ""
+
         result_text += f"{i}. {keyword}\n"
         result_text += f"💡 {reason}\n"
         result_text += f"🏷️ {genre}\n"
+        result_text += rank_str
         result_text += f"🔗 {url}\n\n"
     
     await ctx.send(result_text)

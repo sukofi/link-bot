@@ -567,7 +567,60 @@ class RankingStorage:
         
         conn.commit()
         conn.close()
-    
+
+    def sync_keywords_from_sheet(self, keywords_data: List[Dict[str, Any]]) -> Dict[str, int]:
+        """
+        Google Sheets から取得したキーワード・URLをDBへ同期する。
+
+        既存キーワードは url のみ更新し、intent_label / primary_entity など
+        AIが付与したメタデータは上書きしない。
+        シートにないキーワードはDBに残したまま（削除しない）。
+
+        Args:
+            keywords_data: [{'keyword': str, 'url': str or None}, ...]
+
+        Returns:
+            {'inserted': int, 'updated': int, 'total': int}
+        """
+        now = datetime.now().isoformat()
+        inserted = 0
+        updated = 0
+
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        for item in keywords_data:
+            keyword = item.get("keyword", "").strip()
+            if not keyword:
+                continue
+            url = item.get("url")  # None = 未公開
+
+            cursor.execute("SELECT keyword FROM keywords WHERE keyword = ?", (keyword,))
+            exists = cursor.fetchone()
+
+            if exists:
+                # URL と updated_at のみ更新（他のメタデータは保持）
+                cursor.execute(
+                    "UPDATE keywords SET url = ?, updated_at = ? WHERE keyword = ?",
+                    (url, now, keyword)
+                )
+                updated += 1
+            else:
+                # 新規登録（genre等はNULL、後でAI分析で補完可能）
+                cursor.execute(
+                    """INSERT INTO keywords
+                       (keyword, genre, url, priority, notes, created_at, updated_at)
+                       VALUES (?, NULL, ?, NULL, NULL, ?, ?)""",
+                    (keyword, url, now, now)
+                )
+                inserted += 1
+
+        conn.commit()
+        conn.close()
+
+        print(f"[SYNC] 完了: 新規={inserted}件, 更新={updated}件")
+        return {"inserted": inserted, "updated": updated, "total": inserted + updated}
+
     def get_keyword(self, keyword: str) -> Optional[Dict[str, Any]]:
         """
         キーワード情報を取得（ページ特徴量含む）
